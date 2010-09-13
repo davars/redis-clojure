@@ -1,12 +1,13 @@
 (ns redis.internal
   (:refer-clojure :exclude [send read read-line])
-  (:import [java.io Reader BufferedReader InputStreamReader StringReader]
+  (:use clojure.java.io)
+  (:import [java.io InputStream Reader BufferedInputStream StringReader]
            [java.net Socket]))
 
 (set! *warn-on-reflection* true)
 
 (defstruct connection
-  :host :port :password :db :timeout :socket :reader :writer)
+  :host :port :password :db :timeout :socket :istream :writer)
 
 (def *connection* (struct-map connection
                     :host     "127.0.0.1"
@@ -15,8 +16,10 @@
                     :db       0
                     :timeout  5000
                     :socket   nil
-                    :reader   nil
+                    :istream   nil
                     :writer   nil))
+
+(def *binary-strings* false)
 
 (def *cr*  0x0d)
 (def *lf*  0x0a)
@@ -43,10 +46,10 @@
     (with-open [#^Socket socket (connect-to-server connection)]
       (let [input-stream (.getInputStream socket)
             output-stream (.getOutputStream socket)
-            reader (BufferedReader. (InputStreamReader. input-stream))]
+            input-stream (BufferedInputStream. input-stream)]
         (binding [*connection* (assoc connection 
                                  :socket socket
-                                 :reader reader)]
+                                 :istream input-stream)]
           (func))))))
  
 (defn socket* []
@@ -55,23 +58,10 @@
 
 (defn send-command
   "Send a command string to server"
-  [#^String cmd]
-  (let [out (.getOutputStream (#^Socket socket*))
-        bytes (.getBytes cmd)]
-    (.write out bytes)))
- 
- 
-(defn read-crlf
-  "Read a CR+LF combination from Reader"
-  [#^Reader reader]
-  (let [cr (.read reader)
-        lf (.read reader)]
-    (when-not
-        (and (cr? cr)
-             (lf? lf))
-      (throw (Exception. "Error reading CR/LF")))
-    nil))
- 
+  [cmd]
+  (let [out (.getOutputStream (#^Socket socket*))]
+    (copy cmd out)))
+   
 (defn read-line-crlf
   "Read from reader until exactly a CR+LF combination is
   found. Returns the line read without trailing CR+LF.
@@ -79,19 +69,22 @@
   This is used instead of Reader.readLine() method since that method
   tries to read either a CR, a LF or a CR+LF, which we don't want in
   this case."
-  [#^BufferedReader reader]
-  (loop [line []
-         c (.read reader)]
-    (when (< c 0)
-      (throw (Exception. "Error reading line: EOF reached before CR/LF sequence")))
-    (if (cr? c)
-      (let [next (.read reader)]
-        (if (lf? next)
-          (apply str line)
-          (throw (Exception. "Error reading line: Missing LF"))))
-      (recur (conj line (char c))
-             (.read reader)))))
+  [^InputStream istream]
+    (loop [line []]
+      (let [b (.read istream)]
+	(when (< b 0)
+	  (throw (Exception. 
+		  "Error reading line: EOF reached before CR/LF sequence")))
+	(if (cr? b)
+	  (let [next (.read istream)]
+	    (if (lf? next)
+	      line
+	      (recur (conj (conj line b) next))))
+	  (recur (conj line b))))))
  
+(defn  read-line-crlf-string
+  [^InputStream istream]
+  (apply str (map char (read-line-crlf istream))))
 
 
 ;;
@@ -103,46 +96,49 @@
       (recur reader cbuf (+ offset nread) (- length nread)))))
 
 (defn reply-type
-  ([#^BufferedReader reader]
-     (char (.read reader))))
+  ([^InputStream istream]
+     (char (.read istream))))
 
 (defmulti parse-reply reply-type :default :unknown)
 
 (defn read-reply
   ([]
-     (let [reader (*connection* :reader)]
-       (read-reply reader)))
-  ([#^BufferedReader reader]
-     (parse-reply reader)))
+     (let [istream (*connection* :istream)]
+       (read-reply istream)))
+  ([^InputStream istream]
+     (parse-reply istream)))
 
 (defmethod parse-reply :unknown
-  [#^BufferedReader reader]
+  [^InputStream istream]
   (throw (Exception. (str "Unknown reply type:"))))
  
 (defmethod parse-reply \-
-  [#^BufferedReader reader]
-  (let [error (read-line-crlf reader)]
-    (throw (Exception. (str "Server error: " error)))))
+  [^InputStream istream]
+  (let [error (read-line-crlf-string istream)]
+    (str "Server error: " error)))
  
 (defmethod parse-reply \+
-  [#^BufferedReader reader]
-  (read-line-crlf reader))
+  [^InputStream istream]
+  (read-line-crlf-string istream))
 
 (defmethod parse-reply \$
-  [#^BufferedReader reader]
-  (let [line (read-line-crlf reader)
+  [^InputStream istream]
+  (let [line (read-line-crlf-string istream)
         length (parse-int line)]
     (if (< length 0)
       nil
-      (let [#^chars cbuf (char-array length)]
-        (do
-          (do-read reader cbuf 0 length)
-          (read-crlf reader) ;; CRLF
-          (String. cbuf))))))
+      (let [buf (byte-array length)]
+	(loop [total-read 0]
+	  (let [total-read 
+		(+ total-read (.read istream buf total-read (- length total-read)))]
+	    (if (= total-read length)
+	      (if *binary-strings* buf (String. buf))
+	      (recur total-read))))))))
+
 
 (defmethod parse-reply \*
-  [#^BufferedReader reader]
-  (let [line (read-line-crlf reader)
+  [^InputStream istream]
+  (let [line (read-line-crlf-string istream)
         count (parse-int line)]
     (if (< count 0)
       nil
@@ -153,8 +149,8 @@
           (recur (dec i) (conj replies (read-reply reader))))))))
  
 (defmethod parse-reply \:
-  [#^BufferedReader reader]
-  (let [line (trim (read-line-crlf reader))
+  [^InputStream istream]
+  (let [line (trim (read-line-crlf-string istream))
         int (parse-int line)]
     int))
  
@@ -177,12 +173,17 @@
 (defn bulk-command
   "Create a string for a bulk command"
   [name & args]
-  (let [data (str (last args))
-        data-length (count (str data))
-        args* (concat (butlast args) [data-length])
-        cmd (apply inline-command name args*)]
-    (str cmd data "\r\n")))
-
+  (let [data (last args)
+        data-length (count data)
+        args* (concat [name] (butlast args) [data-length])]
+    (with-open [baos (java.io.ByteArrayOutputStream.)]
+      (copy (str-join " " args*) baos)
+      (copy "\r\n" baos)
+      (copy data baos)
+      (copy "\r\n" baos)
+      (if *binary-strings*
+	(.toByteArray baos)
+	(String. (.toByteArray baos))))))
 
 (defn- sort-command-args-to-string
   [args]
