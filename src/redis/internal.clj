@@ -1,7 +1,7 @@
 (ns redis.internal
   (:refer-clojure :exclude [send read read-line])
   (:use clojure.java.io)
-  (:import [java.io InputStream Reader BufferedInputStream StringReader]
+  (:import [java.io InputStream BufferedInputStream]
            [java.net Socket]))
 
 (defstruct connection
@@ -88,11 +88,6 @@
 ;;
 ;; Reply dispatching
 ;;
-(defn- do-read [#^Reader reader #^chars cbuf offset length]
-  (let [nread (.read reader cbuf offset length)]
-    (if (not= nread length)
-      (recur reader cbuf (+ offset nread) (- length nread)))))
-
 (defn reply-type
   ([^InputStream istream]
      (char (.read istream))))
@@ -144,7 +139,7 @@
              replies []]
         (if (zero? i)
           replies
-          (recur (dec i) (conj replies (read-reply reader))))))))
+          (recur (dec i) (conj replies (read-reply istream))))))))
  
 (defmethod parse-reply \:
   [^InputStream istream]
