@@ -4,8 +4,6 @@
   (:import [java.io InputStream Reader BufferedInputStream StringReader]
            [java.net Socket]))
 
-(set! *warn-on-reflection* true)
-
 (defstruct connection
   :host :port :password :db :timeout :socket :istream :writer)
 
