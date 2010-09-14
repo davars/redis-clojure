@@ -125,7 +125,9 @@
 	  (let [total-read 
 		(+ total-read (.read istream buf total-read (- length total-read)))]
 	    (if (= total-read length)
-	      (if *binary-strings* buf (String. buf))
+	      (do
+		(assert (= "" (read-line-crlf-string istream)))
+		(if *binary-strings* buf (String. buf)))
 	      (recur total-read))))))))
 
 
