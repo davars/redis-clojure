@@ -180,6 +180,26 @@
 	(.toByteArray baos)
 	(String. (.toByteArray baos))))))
 
+(defn ->bytes [input]
+  (with-open [baos (java.io.ByteArrayOutputStream.)]
+    (copy (if (number? input) (str input) input) baos)
+    (.toByteArray baos)))
+
+(defn unified-command
+  "Create a string for a unified command"
+  [& args]
+  (with-open [baos (java.io.ByteArrayOutputStream.)]
+    (copy (str "*" (count args) "\r\n") baos)
+    (doseq [arg args]
+      (let [arg-bytes (->bytes arg)]
+	(copy (str "$" (count arg-bytes) "\r\n") baos)
+	(copy arg-bytes baos)
+	(copy "\r\n" baos)))
+    (if *binary-strings*
+      (.toByteArray baos)
+      (String. (.toByteArray baos)))))
+
+
 (defn- sort-command-args-to-string
   [args]
   (loop [arg-strings []
@@ -219,8 +239,8 @@
       (str cmd " " arg-string "\r\n"))))
 
 
-(def command-fns {:inline 'inline-command
-                  :bulk   'bulk-command
+(def command-fns {:inline 'unified-command
+                  :bulk   'unified-command
                   :sort   'sort-command})
 
 
