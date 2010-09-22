@@ -81,6 +81,7 @@
   (set         [key value] :bulk)
   (get         [key] :inline)
   (getset      [key value] :bulk)
+  (setex       [key timeout value] :bulk)
   (setnx       [key value] :bulk int-to-bool)
   (incr        [key] :inline)
   (incrby      [key integer] :inline)
@@ -111,6 +112,8 @@
   (lrem        [key count value] :bulk)
   (lpop        [key] :inline)
   (rpop        [key] :inline)
+  (blpop       [& args] :inline)
+  (brpop       [& args] :inline)
   (rpoplpush   [srckey dstkey] :inline)
   ;; Set commands
   (sadd        [key member] :bulk int-to-bool)
